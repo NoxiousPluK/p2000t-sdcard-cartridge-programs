@@ -34,6 +34,7 @@
 
 #define MODE_AUTOMATIC 0
 #define MODE_MANUAL    1
+#define MODE_FULL      2
 
 // set printf io
 #pragma printf "%i %X %lX %c %s %lu %u"
@@ -75,7 +76,7 @@ int main(void) {
     for(;;) {
         // whether to proceed to next cassette
         print("Select operation:");
-        print("   (M)anual   (A)utomatic   (Q)uit");
+        print("   (M)anual (A)utomatic (F)ull (Q)uit");
         print_recall("   Enter command...");
         wait = 1;
         while(wait == 1) {
@@ -90,6 +91,11 @@ int main(void) {
                     mode = MODE_MANUAL;
                     wait = 0;
                     print("Manual mode set");
+                break;
+                case 15:    // F
+                    mode = MODE_FULL;
+                    wait = 0;
+                    print("Full mode set");
                 break;
                 case 3:     // Q
                     return 0;
@@ -106,6 +112,10 @@ int main(void) {
         print_recall("Rewinding tape...");
         tape_rewind();
         memory[CASSTAT] = 0;
+
+        // in MODE_FULL, tracks whether the single output file for this
+        // cassette pass has already been created
+        uint8_t full_file_open = 0;
 
         while(memory[CASSTAT] != 'M') {
             // read the first block from the tape; the data from the tape is now
@@ -175,43 +185,51 @@ int main(void) {
                 // grab total blocks and start copying first block
                 uint8_t blockcounter = 0;
 
-                // create new file
-                memcpy(filename, description, 8);
-                memcpy(&filename[8], "CAS", 3);
-                parse_fat32_filename(filename);
-                uint8_t res = create_new_file(filename);
-                switch(res) {
-                    case F_ERROR_FILE_EXISTS:
-                        while(res == F_ERROR_FILE_EXISTS) {
-                            print("File exists, auto-renaming...");
-                            rename_fat32_filename(filename);
-                            sprintf(termbuffer, "Trying:%c%.8s.%.3s", COL_YELLOW, filename, &filename[8]);
-                            terminal_printtermbuffer();
-                            res = create_new_file(filename);
-                        }
-                        // fall through
-                    case F_SUCCESS:
-                        uint32_t file_addr = find_in_folder(filename, F_FIND_FILE_NAME);
-                        if(file_addr != 0) {
-                            set_file_pointer(folder_addr, file_addr);
-                            copy_current_tapeblock();
-                        } else {
-                            print_error("Could not create file pointer");
-                            print_error("Fatal exception, terminating.");
+                // in MODE_FULL, only the first program of the pass creates a
+                // file; every subsequent program keeps appending to it, so
+                // the whole cassette ends up in a single .cas file
+                if(mode != MODE_FULL || full_file_open == 0) {
+                    // create new file
+                    memcpy(filename, description, 8);
+                    memcpy(&filename[8], "CAS", 3);
+                    parse_fat32_filename(filename);
+                    uint8_t res = create_new_file(filename);
+                    switch(res) {
+                        case F_ERROR_FILE_EXISTS:
+                            while(res == F_ERROR_FILE_EXISTS) {
+                                print("File exists, auto-renaming...");
+                                rename_fat32_filename(filename);
+                                sprintf(termbuffer, "Trying:%c%.8s.%.3s", COL_YELLOW, filename, &filename[8]);
+                                terminal_printtermbuffer();
+                                res = create_new_file(filename);
+                            }
+                            // fall through
+                        case F_SUCCESS:
+                            uint32_t file_addr = find_in_folder(filename, F_FIND_FILE_NAME);
+                            if(file_addr != 0) {
+                                set_file_pointer(folder_addr, file_addr);
+                                full_file_open = 1;
+                            } else {
+                                print_error("Could not create file pointer");
+                                print_error("Fatal exception, terminating.");
+                                return -1;
+                            }
+                        break;
+                        case F_ERROR_CARD_FULL:
+                            print_error("SD-card is full.");
+                            print("Please replace SD-card and restart");
+                            print_error("Terminating.");
                             return -1;
-                        }
-                    break;
-                    case F_ERROR_CARD_FULL:
-                        print_error("SD-card is full.");
-                        print("Please replace SD-card and restart");
-                        print_error("Terminating.");
-                        return -1;
-                    break;
-                    default:
-                        print_error("Fatal error encountered, terminating.");
-                        return -1;
-                    break;
+                        break;
+                        default:
+                            print_error("Fatal error encountered, terminating.");
+                            return -1;
+                        break;
+                    }
                 }
+
+                // copy the first (already-read) block of this program
+                copy_current_tapeblock();
 
                 // consume all blocks
                 while(memory[BLOCKCTR] > 1) {
